@@ -1,0 +1,128 @@
+"""Azure OpenAI LLM provider (standard Azure OpenAI deployments endpoint).
+{% if include_observability %}
+
+The client comes from ``langfuse.openai``, not ``openai``. That is the only thing
+that puts token counts and cost on Langfuse traces: importing that module patches
+the OpenAI SDK's completion methods so every call emits a *generation* observation
+carrying ``usage_details``/``cost_details``. See :mod:`app.core.observability`.
+{% endif %}
+"""
+
+from __future__ import annotations
+
+from typing import Any, cast
+
+import openai
+import structlog
+{% if include_observability %}
+from langfuse.openai import AsyncAzureOpenAI  # type: ignore[attr-defined]
+{% else %}
+from openai import AsyncAzureOpenAI
+{% endif %}
+from openai.types.chat import ChatCompletionMessageParam
+from pydantic import BaseModel
+
+from app.llm.base import (
+    LLMAuthError,
+    LLMContextLengthError,
+    LLMProvider,
+    LLMRateLimitError,
+    LLMServiceUnavailableError,
+)
+from app.llm.config import AzureOpenAILLMConfig, LLMSettings
+from app.llm.providers import _extract_retry_after
+
+logger = structlog.get_logger(__name__)
+
+
+class AzureOpenAILLM(LLMProvider):
+    """Azure OpenAI LLM via the standard deployments endpoint."""
+
+    def __init__(
+        self, config: AzureOpenAILLMConfig, api_key: str, llm_settings: LLMSettings
+    ) -> None:
+        self._config = config
+        self._settings = llm_settings
+        self._client = AsyncAzureOpenAI(
+            azure_endpoint=config.endpoint,
+            azure_deployment=config.deployment,
+            api_key=api_key,
+            api_version=config.api_version,
+            timeout=float(llm_settings.timeout_s),
+            max_retries=0,
+        )
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        response_format: type[BaseModel] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> str | BaseModel:
+        tokens = max_tokens or self._settings.max_tokens
+        logger.debug(
+            "llm.azure_openai.request",
+            deployment=self._config.deployment,
+            n=len(messages),
+        )
+{% if include_observability %}
+        extra: dict[str, Any] = {
+            "name": f"azure_openai:{response_format.__name__ if response_format else 'chat'}"
+        }
+{% else %}
+        extra: dict[str, Any] = {}
+{% endif %}
+        try:
+            if response_format is not None:
+                parse_resp = await self._client.beta.chat.completions.parse(
+                    model=self._config.deployment,
+                    messages=cast(list[ChatCompletionMessageParam], messages),
+                    response_format=response_format,
+                    temperature=temperature,
+                    max_completion_tokens=tokens,
+                    **extra,
+                )
+                result = parse_resp.choices[0].message.parsed
+                # response_format was passed, so the provider contract guarantees a
+                # validated instance of it (never a bare refusal/None) — narrow here
+                # so the return type is `str | BaseModel`, not a leaked `Any`.
+                assert isinstance(result, response_format)
+                logger.info(
+                    "llm.azure_openai.success",
+                    deployment=self._config.deployment,
+                    structured=True,
+                )
+                return result
+            create_resp = await self._client.chat.completions.create(
+                model=self._config.deployment,
+                messages=cast(list[ChatCompletionMessageParam], messages),
+                temperature=temperature,
+                max_completion_tokens=tokens,
+                **extra,
+            )
+            text = create_resp.choices[0].message.content or ""
+            logger.info(
+                "llm.azure_openai.success",
+                deployment=self._config.deployment,
+                structured=False,
+            )
+            return text
+        except openai.AuthenticationError as exc:
+            raise LLMAuthError(str(exc)) from exc
+        except openai.BadRequestError as exc:
+            msg = str(exc)
+            if (
+                "context" in msg.lower()
+                or "token" in msg.lower()
+                or "max_completion_tokens" in msg.lower()
+            ):
+                raise LLMContextLengthError(msg) from exc
+            raise LLMAuthError(msg) from exc
+        except openai.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc), retry_after=_extract_retry_after(exc)) from exc
+        except (
+            openai.APIConnectionError,
+            openai.InternalServerError,
+            openai.APITimeoutError,
+        ) as exc:
+            raise LLMServiceUnavailableError(str(exc)) from exc

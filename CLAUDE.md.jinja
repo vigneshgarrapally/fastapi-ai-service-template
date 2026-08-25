@@ -1,0 +1,180 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project overview
+
+{{ project_name }} — {{ project_description }}
+
+Generated from the team's AI-ML service template (Copier). Run `uvx copier update` to pull in
+template improvements later — see SETUP.md.
+
+## Package manager — always `uv`, never raw pip
+
+```bash
+uv sync
+{% if include_backend %}
+uv run uvicorn app.main:app --reload
+{% endif %}
+{% if include_database %}
+uv run alembic upgrade head
+{% endif %}
+```
+
+## Architecture
+{% if include_backend or include_worker %}
+
+This runs as {% if include_backend and include_worker %}two processes: the API and the worker{% elif include_backend %}a single API process{% else %}a worker process{% endif %}.
+{% endif %}
+
+```
+app/
+├── core/
+│   ├── config.py          # Settings: secrets from .env, everything else from config.yaml
+│   ├── logging.py         # structlog: pretty in dev, JSON in prod
+{% if include_backend %}
+│   ├── middleware.py       # RequestContextMiddleware (request_id, traceID in logs)
+{% endif %}
+│   ├── dependencies.py     # FastAPI Annotated deps
+{% if include_auth %}
+│   ├── auth.py             # X-API-Key header auth → ApiKeyDep
+{% endif %}
+│   ├── security.py         # hash_with_salt(), fingerprint_body()
+│   ├── exceptions.py       # Global exception handler
+{% if include_observability %}
+│   ├── observability.py    # Langfuse CallbackHandler factory (no-op if keys unset)
+│   └── tracing.py          # OpenTelemetry OTLP gRPC exporter setup
+{% endif %}
+{% if include_database %}
+├── db/
+│   ├── postgres.py         # SQLAlchemy async engine + session factory
+│   ├── models/             # ORM models (Base, mixins, {% if include_auth %}ApiKey, {% endif %}{% if include_worker %}Job, IdempotencyRecord{% endif %})
+│   └── repositories/       # One repository class per model
+{% endif %}
+{% if include_ai_service %}
+├── llm/
+│   ├── base.py             # LLMProvider ABC + exception hierarchy
+│   ├── config.py           # Per-provider settings
+│   ├── factory.py          # init_llm() / get_llm() singleton
+│   └── providers/          # azure_openai / openai / ollama implementations
+{% endif %}
+{% if include_worker %}
+├── infrastructure/
+│   └── rabbitmq.py         # ai.jobs topology + publish_job()
+{% endif %}
+{% if include_backend %}
+├── api/
+│   ├── scalar.py           # Interactive API reference at /scalar (non-prod only)
+│   └── v1/
+│       ├── router.py
+│       └── endpoints/
+{% endif %}
+{% if include_ai_service %}
+├── features/
+│   └── ai/                 # The conversational agent: graph.py, memory.py, tools/, prompts/
+{% endif %}
+{% if include_worker %}
+├── worker/
+│   ├── main.py             # Unified worker entry point
+{% if include_ai_service %}
+│   ├── ai_job_worker.py    # Consumes "chat" jobs, calls app.features.ai.service
+{% endif %}
+│   └── idempotency_cleanup.py
+{% endif %}
+└── schemas/                # Add Pydantic request/response models here as the project grows
+{% if include_ai_service %}
+evals/                      # LLM-as-judge scoring of the AI service's output — not pytest
+{% endif %}
+tests/                      # Mirrors app/ — conftest.py mocks all infrastructure
+```
+
+### Adding a new feature
+1. `app/features/<name>/` — business logic
+2. `app/schemas/<name>.py` — Pydantic request/response models
+{% if include_backend %}
+3. `app/api/v1/endpoints/<name>.py` — FastAPI router, then register it in `app/api/v1/router.py`
+{% endif %}
+{% if include_database %}
+4. New ORM models: add to `app/db/models/`, then `uv run alembic revision --autogenerate -m "add <name>"` and `uv run alembic upgrade head`
+{% endif %}
+
+### Dependency injection
+Cross-cutting concerns are `Annotated` type aliases in `app/core/dependencies.py`
+(`SettingsDep`{% if include_database %}, `SessionDep`{% endif %}{% if include_auth %}, `ApiKeyRepoDep`{% endif %}{% if include_ai_service %}, `LLMDep`{% endif %}{% if include_cache %}, `CacheDep`{% endif %}).
+Use these as FastAPI function parameter types — never instantiate infrastructure directly in endpoint handlers.
+{% if include_auth %}
+
+### Auth
+Keys are `ak_<64-hex>` (see `app.core.auth.API_KEY_PREFIX`). Only `SHA256(key + API_KEY_SALT)`
+is stored. Every endpoint that needs auth declares `_auth: ApiKeyDep`. Manage keys with
+`uv run python scripts/manage_api_keys.py`.
+{% endif %}
+{% if include_worker %}
+
+### Idempotency
+Endpoints that enqueue jobs accept `X-Idempotency-Key`. Requests with the same key + matching
+payload fingerprint (`SHA256(body)`) return the cached response. Implemented in
+`app/db/repositories/idempotency.py` via a three-phase claim/complete/fail protocol — see the
+module docstring and `docs/decisions/idempotency.md`{% if include_docs_site %} (present since the Docs component is included){% endif %}.
+{% endif %}
+{% if include_database %}
+
+### Postgres + Alembic
+
+```bash
+uv run alembic upgrade head                              # apply all pending migrations
+uv run alembic revision --autogenerate -m "describe it"   # after changing ORM models
+uv run alembic downgrade -1                                # roll back one step
+```
+{% if include_worker %}
+
+Workers use **session-per-message**: each RabbitMQ message gets its own
+`async with session_factory() as session: async with session.begin():` block. Never share a
+session across messages.
+{% endif %}
+{% endif %}
+{% if include_worker %}
+
+### RabbitMQ topology
+`ai.jobs` (direct exchange) → `ai.jobs.q`, dead-lettering to `ai.jobs.dlx` → `ai.jobs.dlq`.
+Add a second job type by copying this pattern (exchange + queue + DLX + DLQ) in
+`app/infrastructure/rabbitmq.py` rather than overloading one queue with multiple message shapes.
+Redrive a dead-lettered batch after a fix with `uv run python scripts/redrive_dlq.py`.
+{% endif %}
+{% if include_observability %}
+
+### Observability stack
+- **Langfuse**: LLM call tracing — set `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`; silent no-op if absent
+- **OpenTelemetry**: set `OBSERVABILITY__OTEL_ENDPOINT` (gRPC, e.g. Tempo/Jaeger)
+- **Prometheus**: `GET /metrics` (unauthenticated) — `docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d` for local Grafana + Prometheus
+- **Structured logging**: `structlog`, JSON in prod, pretty in dev; `request_id`/`trace_id` injected per-request by `RequestContextMiddleware`
+{% endif %}
+{% if include_ai_service %}
+
+### LLM provider switching (zero code changes)
+```bash
+# Ollama (local)
+AI__LLM__PROVIDER=ollama
+
+# OpenAI
+AI__LLM__PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+# Azure OpenAI
+AI__LLM__PROVIDER=azure_openai
+AZURE_OPENAI_API_KEY=<key>
+```
+{% endif %}
+
+### Testing
+- `tests/` mirrors `app/`. `conftest.py` mocks all infrastructure via `AsyncMock`/`MagicMock`.
+- Async tests use `pytest-asyncio` (`asyncio_mode = auto`).
+- Run a single test: `uv run pytest tests/path/to/test_file.py`
+- Every confirmed bug fix should land with a regression test in the same change — one that
+  asserts the specific broken behavior (would have failed before the fix), not just that the
+  code runs.
+
+### Pre-commit hooks
+`.pre-commit-config.yaml` enforces on every `git commit`: file hygiene, `check-merge-conflict`,
+`detect-private-key`, `no-commit-to-branch: main`, `ruff` + `ruff-format`. `mypy` runs at
+`stages: [manual]` locally (slow) but always in CI.

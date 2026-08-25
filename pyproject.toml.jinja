@@ -1,0 +1,99 @@
+[project]
+name = "{{ project_slug }}"
+version = "0.1.0"
+description = "{{ project_description }}"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic[email]>=2.12.0",
+    "pydantic-settings>=2.13.1",
+    "structlog>=24.4.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.28.0",
+{% if include_backend %}
+    "fastapi>=0.115.0",
+    "scalar-fastapi==1.8.2",
+    "uvicorn[standard]>=0.42.0",
+    "python-multipart>=0.0.12",
+    "prometheus-fastapi-instrumentator>=7.1.0",
+{% endif %}
+{% if include_database %}
+    "sqlalchemy[asyncio]>=2.0.40",
+    "asyncpg>=0.30.0",
+    "alembic>=1.16.0",
+{% endif %}
+{% if include_worker %}
+    "aio-pika>=9.0.0",
+{% endif %}
+{% if include_cache %}
+    "redis>=5.0.0",
+{% endif %}
+{% if include_observability %}
+    "langfuse>=4.0.0",
+    "opentelemetry-sdk>=1.41.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.41.0",
+    "opentelemetry-instrumentation-httpx>=0.62b0",
+{% if include_backend %}
+    "opentelemetry-instrumentation-fastapi>=0.62b0",
+{% endif %}
+{% endif %}
+{% if include_ai_service %}
+    "langgraph>=0.6.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.3.0",
+{% endif %}
+]
+
+authors = [
+    { name = "{{ author_name }}", email = "{{ author_email }}" },
+]
+keywords = ["ai", "ml", "fastapi", "llm-agent"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=app --cov-report=term-missing"
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.2",
+{% if include_worker %}
+    "watchfiles>=1.0.0",
+{% endif %}
+]
+{% if include_docs_site %}
+docs = [
+    "mkdocs-material>=9.5.0",
+    "pymdown-extensions>=10.0",
+    "mkdocs-mermaid-to-svg>=1.0.0",
+    "mkdocs-glightbox>=0.4.0",
+    "mkdocs-git-revision-date-localized-plugin>=1.5.3",
+]
+{% endif %}

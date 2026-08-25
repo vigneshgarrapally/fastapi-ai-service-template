@@ -1,0 +1,185 @@
+"""LangGraph tool-calling agent — the reasoning core of the chat service.
+
+``LLMProvider.complete()`` (used everywhere else in this service) takes plain
+role/content dicts and returns a ``str | BaseModel`` — but LangGraph's prebuilt
+tool-calling nodes (``ToolNode``, ``tools_condition``) expect LangChain-native
+message and tool-call objects. Rather than hand-roll a tool loop on top of
+``LLMProvider``, this module builds the graph directly on a LangChain chat
+model instance (``AzureChatOpenAI``/``ChatOpenAI``), constructed straight from
+``settings.ai.llm`` the same way ``app.llm.factory`` builds an ``LLMProvider``.
+This is the one place in the AI service that talks to a provider SDK directly
+instead of going through the ``LLMProvider`` abstraction.
+
+``run_graph()`` is the module's only public entry point — everything else
+here is an implementation detail of the agent loop.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Annotated, Any, TypedDict
+{% if include_observability %}
+from uuid import uuid4
+{% endif %}
+
+from langchain_core.messages import AnyMessage, BaseMessage, SystemMessage
+from langchain_core.messages.utils import convert_to_messages
+from langgraph.graph import START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import SecretStr
+
+from app.core.config import Settings, get_settings
+from app.features.ai.tools.example_tools import calculator, get_current_time
+{% if include_observability %}
+from app.core.observability import get_langfuse
+{% endif %}
+
+_TOOLS = [get_current_time, calculator]
+
+# Prompts live as separate .md files (not inline strings) so prompt copy can be
+# iterated on without touching code — the common convention in LLM-as-judge /
+# agent templates.
+_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
+
+
+class AgentState(TypedDict):
+    """Graph state: the running conversation as LangChain message objects."""
+
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+@lru_cache
+def _load_system_prompt() -> str:
+    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+
+
+def _build_chat_model(settings: Settings) -> Any:
+    """Construct the LangChain chat model for the configured provider.
+
+    Mirrors the provider switch in ``app.llm.factory.init_llm_provider``, but
+    returns a LangChain-native chat model instead of an ``LLMProvider`` — see
+    the module docstring for why. Raises the same ``ValueError``s as that
+    factory for a missing/unsupported provider or credential.
+    """
+    llm = settings.ai.llm
+    match llm.provider:
+        case "azure_openai":
+            if not settings.secrets.azure_openai_api_key:
+                raise ValueError(
+                    "AZURE_OPENAI_API_KEY must be set when ai.llm.provider=azure_openai"
+                )
+            if not llm.azure_openai.endpoint:
+                raise ValueError("ai.llm.azure_openai.endpoint must be set")
+            from langchain_openai import AzureChatOpenAI
+
+            return AzureChatOpenAI(
+                azure_endpoint=llm.azure_openai.endpoint,
+                azure_deployment=llm.azure_openai.deployment,
+                api_version=llm.azure_openai.api_version,
+                api_key=SecretStr(settings.secrets.azure_openai_api_key),
+                temperature=settings.ai.temperature,
+                timeout=llm.timeout_s,
+                max_completion_tokens=llm.max_tokens,
+            )
+        case "openai":
+            if not settings.secrets.openai_api_key:
+                raise ValueError("OPENAI_API_KEY must be set when ai.llm.provider=openai")
+            from langchain_openai import ChatOpenAI
+
+            return ChatOpenAI(
+                base_url=llm.openai.base_url,
+                model=llm.openai.model,
+                api_key=SecretStr(settings.secrets.openai_api_key),
+                temperature=settings.ai.temperature,
+                timeout=llm.timeout_s,
+                max_completion_tokens=llm.max_tokens,
+            )
+        case "ollama":
+            from langchain_openai import ChatOpenAI
+
+            # Ollama's OpenAI-compatible /v1 endpoint — same approach as
+            # app.llm.providers.ollama.OllamaLLM. No real API key needed, and
+            # no langchain-ollama dependency required for this.
+            return ChatOpenAI(
+                base_url=llm.ollama.base_url,
+                model=llm.ollama.model,
+                api_key=SecretStr("ollama"),
+                temperature=settings.ai.temperature,
+                timeout=llm.timeout_s,
+                max_completion_tokens=llm.max_tokens,
+            )
+        case _:
+            raise ValueError(f"Unsupported LLM provider: {llm.provider!r}")
+
+
+@lru_cache
+def _get_compiled_graph() -> Any:
+    """Build and compile the tool-calling agent graph once, then cache it.
+
+    Lazy (first-call) rather than at import time, so tests can monkeypatch
+    settings or tools before anything touches a real provider SDK.
+    """
+    model = _build_chat_model(get_settings()).bind_tools(_TOOLS)
+
+    async def agent_node(state: AgentState) -> dict[str, list[AnyMessage]]:
+        response = await model.ainvoke(state["messages"])
+        return {"messages": [response]}
+
+    builder = StateGraph(AgentState)
+    builder.add_node("agent", agent_node)
+    builder.add_node("tools", ToolNode(_TOOLS))
+    builder.add_edge(START, "agent")
+    # tools_condition routes to "tools" if the agent's last message requested
+    # a tool call, otherwise to END — the standard LangGraph ReAct loop.
+    builder.add_conditional_edges("agent", tools_condition)
+    builder.add_edge("tools", "agent")
+    return builder.compile()
+
+
+async def run_graph(messages: list[dict[str, str]]) -> str:
+    """Run one turn of the tool-calling agent loop and return the reply text.
+
+    Args:
+        messages: OpenAI-style role/content dicts — the conversation history
+            plus the new user turn. The agent's own system prompt is
+            prepended here, so callers should not include one.
+
+    Returns:
+        The final AI message's text content.
+    """
+    graph = _get_compiled_graph()
+    lc_messages: list[BaseMessage] = [
+        SystemMessage(content=_load_system_prompt()),
+        *convert_to_messages(messages),
+    ]
+{% if include_observability %}
+
+    langfuse = get_langfuse()
+    trace_id = langfuse.create_trace_id(seed=f"chat-{uuid4()}")
+    with langfuse.start_trace_span("agent-turn", trace_id) as span:
+        callbacks = []
+        if span:
+            span.update(input=[m.content for m in lc_messages])
+            handler = langfuse.get_langchain_handler()
+            if handler:
+                callbacks = [handler]
+        result = await graph.ainvoke({"messages": lc_messages}, config={"callbacks": callbacks})
+        content = result["messages"][-1].content
+        reply = _content_to_text(content)
+        if span:
+            span.update(output=reply)
+        return reply
+{% else %}
+    result = await graph.ainvoke({"messages": lc_messages})
+    return _content_to_text(result["messages"][-1].content)
+{% endif %}
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    # Some providers can return content as a list of blocks instead of a
+    # plain string — join any text blocks together.
+    return "".join(block.get("text", "") for block in content if isinstance(block, dict))

@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main", "dev"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+{% if include_database %}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: {{ project_slug | replace('-', '_') }}
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+{% endif %}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Lint (Ruff)
+        run: uv run ruff check .
+
+      - name: Format check (Ruff)
+        run: uv run ruff format --check .
+
+      - name: Type check (MyPy)
+        run: uv run mypy app/
+{% if include_database %}
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/{{ project_slug | replace('-', '_') }}
+{% endif %}
+
+      - name: Security audit
+        run: uvx pip-audit
+
+      - name: Test (Pytest)
+        run: uv run pytest
+{% if include_docs_site %}
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history — git-revision-date-localized needs real commit dates,
+          # not just the checkout commit's, to render accurate per-page timestamps.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev --group docs
+
+      - name: Install mermaid-cli
+        run: |
+          npm install -g @mermaid-js/mermaid-cli
+          npx puppeteer browsers install chrome-headless-shell
+
+      - name: Build docs (strict)
+        run: uv run mkdocs build --strict
+{% endif %}
+
+# No docker-build/deploy jobs here on purpose — those depend on where this
+# project actually gets hosted (which this template can't know). See
+# docs/operations/deployment.md (if the Docs component is included) or add
+# your own job here once a target is chosen; screenx-ai-hub's own
+# .github/workflows/ci.yml is a worked example to copy from.

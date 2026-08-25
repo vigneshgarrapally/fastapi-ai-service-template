@@ -1,0 +1,30 @@
+"""Tests for the config split — secrets in env, everything else in config.yaml."""
+
+from app.core.config import Settings
+
+
+def test_config_yaml_loads_expected_nested_values():
+    """The committed config.yaml populates the nested groups with its values.
+
+    ``_env_file=None`` isolates the test from any developer's local ``.env``
+    (which legitimately overrides these values on a dev machine).
+    """
+    settings = Settings(_env_file=None)
+
+    assert settings.app.app_name == "{{ project_name }}"
+    assert settings.app.log_level == "INFO"
+{% if include_database %}
+    assert settings.database.pool_size == 10
+{% endif %}
+{% if include_ai_service %}
+    assert settings.ai.llm.provider == "{{ llm_provider_default }}"
+{% endif %}
+
+
+def test_env_var_overrides_yaml_value(monkeypatch):
+    """A `GROUP__FIELD` env var beats the yaml value (env > .env > yaml)."""
+    monkeypatch.setenv("APP__LOG_LEVEL", "DEBUG")
+
+    settings = Settings()
+
+    assert settings.app.log_level == "DEBUG"

@@ -1,0 +1,74 @@
+"""Shared pytest fixtures — mocks all infrastructure so tests never touch a
+real Postgres/RabbitMQ/LLM/observability backend.
+"""
+
+from contextlib import ExitStack
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+{% if include_backend %}
+from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
+{% endif %}
+
+
+def _infra_patches() -> list:
+    """All infrastructure patches needed to spin up the app in tests."""
+    patches = []
+{% if include_database %}
+    patches += [
+        patch("app.main.init_engine", new=MagicMock()),
+        patch("app.main.dispose_engine", new=AsyncMock()),
+        patch("app.main.verify_connection", new=AsyncMock()),
+    ]
+{% endif %}
+{% if include_worker %}
+    patches += [
+        patch("app.infrastructure.rabbitmq.connect", new=AsyncMock()),
+        patch("app.infrastructure.rabbitmq.disconnect", new=AsyncMock()),
+        patch("app.infrastructure.rabbitmq.publish_job", new=AsyncMock()),
+    ]
+{% endif %}
+{% if include_cache %}
+    patches += [
+        patch("app.main.init_cache_client", new=AsyncMock()),
+        patch("app.main.close_cache_client", new=AsyncMock()),
+    ]
+{% endif %}
+{% if include_ai_service %}
+    patches += [patch("app.main.init_llm", new=MagicMock())]
+{% endif %}
+{% if include_observability %}
+    patches += [
+        patch("app.main.init_langfuse", new=MagicMock()),
+        patch("app.main.shutdown_langfuse", new=MagicMock()),
+    ]
+{% endif %}
+    return patches
+{% if include_backend %}
+
+
+@pytest.fixture
+def client() -> TestClient:
+    """Sync test client with all external dependencies mocked out."""
+    with ExitStack() as stack:
+        for p in _infra_patches():
+            stack.enter_context(p)
+
+        from app.main import app
+
+        yield TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.fixture
+async def async_client() -> AsyncClient:
+    """Async test client with all external dependencies mocked out."""
+    with ExitStack() as stack:
+        for p in _infra_patches():
+            stack.enter_context(p)
+
+        from app.main import app
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+{% endif %}

@@ -1,0 +1,121 @@
+# Setup
+
+This project was generated from the AI-ML service template with:
+{% if include_backend %}
+- **Backend** (FastAPI)
+{% endif %}
+{% if include_database %}
+- **Database** (Postgres + Alembic)
+{% endif %}
+{% if include_worker %}
+- **Worker** (RabbitMQ async job runtime)
+{% endif %}
+{% if include_cache %}
+- **Cache** (Redis)
+{% endif %}
+{% if include_observability %}
+- **Observability** (Langfuse + OTel + Prometheus/Grafana)
+{% endif %}
+{% if include_docs_site %}
+- **Docs site** (MkDocs)
+{% endif %}
+{% if include_auth %}
+- **Auth** (X-API-Key)
+{% endif %}
+{% if include_ai_service %}
+- **AI service** (LLM provider abstraction + conversational agent + evals), default provider: `{{ llm_provider_default }}`
+{% endif %}
+
+## First-time setup
+
+```bash
+uv sync
+```
+{% if include_database %}
+
+```bash
+cp .env.example .env   # fill in DATABASE_URL if it differs from the default
+uv run alembic upgrade head
+```
+{% elif include_ai_service or include_auth or include_observability %}
+
+```bash
+cp .env.example .env   # fill in the secrets below
+```
+{% endif %}
+{% if include_ai_service %}
+
+Fill in `.env`'s LLM credentials matching `ai.llm.provider` in `config.yaml` (default: `{{ llm_provider_default }}`).
+{% endif %}
+{% if include_auth %}
+
+Generate an API key: `python scripts/manage_api_keys.py create --label "local-dev"` (prints the raw key once — save it).
+{% endif %}
+
+**Commit `uv.lock` on your first commit** — CI's `uv sync --frozen` depends on it existing.
+
+## Running it
+{% if include_backend or include_worker or include_database or include_cache %}
+
+**With Docker:**
+```bash
+docker compose up -d --build
+```
+(`docker-compose.override.yml` is merged automatically — hot reload is on by default.)
+{% endif %}
+{% if include_backend or include_worker or include_docs_site %}
+
+**Natively** (requires{% if include_database %} Postgres{% endif %}{% if include_worker %} and RabbitMQ{% endif %} already running):
+```bash
+process-compose up
+```
+Or run pieces individually:
+{% if include_backend %}
+```bash
+uv run uvicorn app.main:app --reload
+```
+{% endif %}
+{% if include_worker %}
+```bash
+uv run python -m app.worker.main
+```
+{% endif %}
+{% if include_docs_site %}
+```bash
+uv run mkdocs serve -a 0.0.0.0:8001
+```
+{% endif %}
+{% endif %}
+{% if include_observability %}
+
+**Metrics dashboards** (optional, on top of the above):
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+Grafana at `http://localhost:${GRAFANA_PORT:-3001}` (default login `admin`/`admin`, set `GRAFANA_ADMIN_PASSWORD` in `.env` to change it).
+{% endif %}
+
+## Tests
+
+```bash
+uv run pytest
+```
+{% if include_ai_service %}
+
+```bash
+uv run python -m evals.main   # LLM-as-judge output-quality scoring — separate from pytest
+```
+{% endif %}
+
+## Keeping this project in sync with the template
+
+This project was generated with [Copier](https://copier.readthedocs.io/). When the
+template gets an improvement you want (a security fix, a CI upgrade, a new
+component), pull it in with:
+
+```bash
+uvx copier update
+```
+
+Copier 3-way-merges the template's changes against your project, prompting only on
+real conflicts. Commit before running it, same as any merge.

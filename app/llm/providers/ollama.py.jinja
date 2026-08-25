@@ -1,0 +1,109 @@
+"""Ollama LLM provider — OpenAI-compatible endpoint.
+{% if include_observability %}
+
+The client is imported from ``langfuse.openai`` rather than ``openai`` so LLM
+calls show up on Langfuse traces as generations with token usage — see the note
+in :mod:`app.llm.providers.azure_openai`. Ollama reports usage on its
+OpenAI-compatible responses; cost will be zero unless the model is priced in
+Langfuse, which is expected for a local model.
+{% endif %}
+"""
+
+from __future__ import annotations
+
+from typing import Any, cast
+
+import openai
+import structlog
+{% if include_observability %}
+from langfuse.openai import AsyncOpenAI  # type: ignore[attr-defined]
+{% else %}
+from openai import AsyncOpenAI
+{% endif %}
+from openai.types.chat import ChatCompletionMessageParam
+from pydantic import BaseModel
+
+from app.llm.base import (
+    LLMAuthError,
+    LLMContextLengthError,
+    LLMProvider,
+    LLMRateLimitError,
+    LLMServiceUnavailableError,
+)
+from app.llm.config import LLMSettings, OllamaLLMConfig
+from app.llm.providers import _extract_retry_after
+
+logger = structlog.get_logger(__name__)
+
+
+class OllamaLLM(LLMProvider):
+    """Ollama-hosted model via the OpenAI-compatible /v1 endpoint."""
+
+    def __init__(self, config: OllamaLLMConfig, llm_settings: LLMSettings) -> None:
+        self._config = config
+        self._settings = llm_settings
+        self._client = AsyncOpenAI(
+            base_url=config.base_url,
+            api_key="ollama",
+            timeout=float(llm_settings.timeout_s),
+            max_retries=0,
+        )
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        response_format: type[BaseModel] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> str | BaseModel:
+        tokens = max_tokens or self._settings.max_tokens
+        logger.debug("llm.ollama.request", model=self._config.model, n=len(messages))
+{% if include_observability %}
+        extra: dict[str, Any] = {
+            "name": f"ollama:{response_format.__name__ if response_format else 'chat'}"
+        }
+{% else %}
+        extra: dict[str, Any] = {}
+{% endif %}
+        try:
+            if response_format is not None:
+                parse_resp = await self._client.beta.chat.completions.parse(
+                    model=self._config.model,
+                    messages=cast(list[ChatCompletionMessageParam], messages),
+                    response_format=response_format,
+                    temperature=temperature,
+                    max_tokens=tokens,
+                    **extra,
+                )
+                result = parse_resp.choices[0].message.parsed
+                # response_format was passed, so the provider contract guarantees a
+                # validated instance of it (never a bare refusal/None) — narrow here
+                # so the return type is `str | BaseModel`, not a leaked `Any`.
+                assert isinstance(result, response_format)
+                logger.info("llm.ollama.success", model=self._config.model, structured=True)
+                return result
+            create_resp = await self._client.chat.completions.create(
+                model=self._config.model,
+                messages=cast(list[ChatCompletionMessageParam], messages),
+                temperature=temperature,
+                max_tokens=tokens,
+                **extra,
+            )
+            text = create_resp.choices[0].message.content or ""
+            logger.info("llm.ollama.success", model=self._config.model, structured=False)
+            return text
+        except openai.AuthenticationError as exc:
+            raise LLMAuthError(str(exc)) from exc
+        except openai.BadRequestError as exc:
+            msg = str(exc)
+            if "context" in msg.lower() or "token" in msg.lower():
+                raise LLMContextLengthError(msg) from exc
+            raise LLMAuthError(msg) from exc
+        except openai.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc), retry_after=_extract_retry_after(exc)) from exc
+        except (
+            openai.APIConnectionError,
+            openai.InternalServerError,
+            openai.APITimeoutError,
+        ) as exc:
+            raise LLMServiceUnavailableError(str(exc)) from exc

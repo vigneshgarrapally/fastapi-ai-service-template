@@ -1,0 +1,63 @@
+# Non-secret configuration — committed to git, shared across environments.
+# Secrets (API keys, connection strings) live in .env, never here.
+# Override any value per-environment with an env var using the `__` nested
+# delimiter, e.g. AI__TEMPERATURE=0.5 — see docs/operations/environment-variables.md.
+
+app:
+  app_name: "{{ project_name }}"
+  app_version: "0.1.0"
+  environment: "development"
+  debug: false
+{% if include_backend %}
+  host: "0.0.0.0"
+  port: 8000
+  allowed_origins: ["*"]
+{% endif %}
+  log_level: "INFO"
+{% if include_database %}
+
+database:
+  pool_size: 10
+  max_overflow: 20
+{% endif %}
+{% if include_worker %}
+
+worker:
+  prefetch: 5
+  max_retries: 3
+  idem_ttl_hours: 24
+  idem_cleanup_interval_seconds: 3600
+{% endif %}
+{% if include_cache %}
+
+cache:
+  default_ttl_seconds: 3600
+{% endif %}
+{% if include_observability %}
+
+observability:
+  langfuse_host: "https://cloud.langfuse.com"
+  otel_endpoint: ""
+  otel_service_name: ""
+{% endif %}
+{% if include_ai_service %}
+
+ai:
+  llm:
+    provider: "{{ llm_provider_default }}"
+    ollama:
+      base_url: "http://localhost:11434/v1"
+      model: "llama3.1"
+    openai:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o"
+    azure_openai:
+      endpoint: ""
+      deployment: "gpt-4o"
+      api_version: "2024-02-01"
+    timeout_s: 30
+    max_retries: 4
+    max_tokens: 4000
+  temperature: 0.3
+  max_history_messages: 20
+{% endif %}

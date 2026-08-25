@@ -1,0 +1,128 @@
+_min_copier_version: "9.0.0"
+_templates_suffix: ".jinja"
+_envops:
+  trim_blocks: true
+  lstrip_blocks: true
+  keep_trailing_newline: true
+
+_exclude:
+  - "/copier.yml"
+  - ".git"
+  - "/branding"
+  - "/scripts/prepare_release.sh"
+  - "*.pyc"
+  - "__pycache__"
+
+# NOTE on README.md / CLAUDE.md: this template deliberately ships BOTH a plain
+# /README.md + /CLAUDE.md (this repo's own authoring docs, what GitHub/Claude
+# Code see when you're working ON the template) AND README.md.jinja +
+# CLAUDE.md.jinja (rendered into every GENERATED project instead). Do NOT
+# add either plain filename to _exclude — _exclude matches by *destination*
+# path, so excluding "/README.md" would also exclude README.md.jinja's
+# rendered output (same destination name), leaving generated projects with
+# neither. Copier already resolves this the right way on its own: when a
+# plain file and a .jinja file both map to the same destination path, the
+# .jinja one wins at generation time and the plain one is simply never
+# copied — no _exclude needed for this pair at all. (Verified empirically;
+# this is not documented behavior to rely on blindly, so if a future Copier
+# version changes it, this whole note needs revisiting.)
+
+_tasks:
+  - "python3 _tasks_cleanup.py"
+  - "rm -f _tasks_cleanup.py"
+  # Uses the just-rendered pyproject.toml's own [tool.ruff.lint] select list
+  # (E, F, I, UP, B, SIM) — F401 in particular cleans up conditional imports
+  # that end up unused for a given combination of toggles (e.g. AsyncMock
+  # imported in tests/conftest.py.jinja for a component this project declined).
+  - "uvx ruff check --fix . || true"
+  - "uvx ruff format . || true"
+  # copier update relies on the destination being a git repo so it can 3-way-merge
+  # future template changes — set that up now, with an initial commit as the merge base.
+  - "git init -q"
+  - "git add -A"
+  - "git commit -q -m 'chore: initial project generated from ai-ml-service-template' || true"
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+project_name:
+  type: str
+  help: "Human-readable project name (shown in docs, FastAPI title, README)"
+  default: "My AI Service"
+
+project_slug:
+  type: str
+  help: "Machine-friendly slug — used for the Docker/compose project name, DB name, API key prefix"
+  default: "{{ project_name | lower | replace(' ', '-') | replace('_', '-') }}"
+
+project_description:
+  type: str
+  help: "One-sentence description of what this service does"
+  default: "An AI-ML service built on the team's project template."
+
+author_name:
+  type: str
+  help: "Your name (used in LICENSE / pyproject.toml)"
+
+author_email:
+  type: str
+  help: "Your email (used in pyproject.toml)"
+
+# ---------------------------------------------------------------------------
+# Components — infrastructure primitives. Each is independent; enable only
+# what this project actually needs.
+# ---------------------------------------------------------------------------
+include_backend:
+  type: bool
+  help: "Component: Backend — expose a FastAPI HTTP API (app/main.py, app/api/). Say no for a pure library/CLI/worker-only project."
+  default: true
+
+include_database:
+  type: bool
+  help: "Component: Database — Postgres + SQLAlchemy async + Alembic migrations"
+  default: true
+
+include_worker:
+  type: bool
+  help: "Component: Worker — RabbitMQ + a durable async job runtime (submit now, process later, poll for result). Skip this for a purely synchronous request/response service."
+  default: false
+  when: "{{ include_database }}"
+
+include_cache:
+  type: bool
+  help: "Component: Cache — a small Redis client wrapper (sessions, rate limits, short-term memory)"
+  default: false
+
+include_observability:
+  type: bool
+  help: "Component: Observability — Langfuse LLM tracing + OpenTelemetry + Prometheus/Grafana dashboards"
+  default: false
+
+include_docs_site:
+  type: bool
+  help: "Component: Docs site — a MkDocs Material site with Mermaid diagrams (requires Node.js to build, not just serve)"
+  default: false
+
+# ---------------------------------------------------------------------------
+# Services — business-capability modules built on top of the components above.
+# ---------------------------------------------------------------------------
+include_auth:
+  type: bool
+  help: "Service: Auth — X-API-Key header authentication, backed by Postgres"
+  default: false
+  when: "{{ include_database }}"
+
+include_ai_service:
+  type: bool
+  help: "Service: AI — LLM provider abstraction, a small conversational agent (tools + memory), and an LLM-as-judge evals harness for its output"
+  default: true
+
+llm_provider_default:
+  type: str
+  help: "Default LLM provider for the AI service (switchable later via env var, zero code changes)"
+  choices:
+    - azure_openai
+    - openai
+    - ollama
+  default: azure_openai
+  when: "{{ include_ai_service }}"

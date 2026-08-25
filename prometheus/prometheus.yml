@@ -1,0 +1,11 @@
+# Prometheus scrape config for the FastAPI /metrics endpoint (prometheus-fastapi-instrumentator).
+# Run alongside the app via the docker-compose.observability.yml overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "fastapi"
+    static_configs:
+      - targets: ["fastapi:8000"]
+    metrics_path: /metrics

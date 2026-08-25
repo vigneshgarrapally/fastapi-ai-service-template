@@ -1,0 +1,54 @@
+# Dockerfile.docs — builds the MkDocs static site, ships it via nginx only.
+#
+# Multi-stage on purpose: mermaid-to-svg needs Node.js + a headless Chrome
+# binary (~200MB+ with its shared libs) to pre-render Mermaid diagrams to SVG
+# at build time — none of that belongs in the image that serves the docs.
+# The runtime stage is plain nginx:alpine with nothing else in it.
+#
+# Dev/local only — this image is not part of the production deployment.
+
+FROM python:3.13-slim-bookworm AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Debian bookworm's own `nodejs` apt package is too old for mermaid-cli's
+# dependency tree — use NodeSource's setup script for a real LTS instead.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends \
+    nodejs \
+    unzip \
+    # headless Chrome's runtime deps (mermaid-cli/puppeteer)
+    fonts-liberation libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+    libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+    libxrandr2 libgbm1 libasound2 \
+    && npm install -g @mermaid-js/mermaid-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --group dev --group docs
+
+COPY . /app
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --group dev --group docs
+
+# Downloads the exact Chrome revision mermaid-cli's puppeteer-core expects —
+# needs network access at build time, same as the npm install above.
+RUN npx puppeteer browsers install chrome-headless-shell
+
+RUN uv run mkdocs build --strict
+
+# ── Runtime — bare nginx, nothing from the builder stage except the static site ──
+FROM nginx:alpine
+
+COPY --from=builder /app/site /usr/share/nginx/html
+
+EXPOSE 80

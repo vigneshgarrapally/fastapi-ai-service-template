@@ -1,0 +1,194 @@
+# {{ project_name }} — application stack
+#
+# Usage
+# -----
+#   docker compose up -d --build
+#
+# docker-compose.override.yml is merged automatically in dev (hot reload).
+# Pass `-f docker-compose.yml` alone (no override) for a production-shaped run.
+{% if include_observability %}
+# Add `-f docker-compose.observability.yml` to also run Grafana + Prometheus.
+{% endif %}
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+{% if include_database %}
+  postgres_data:
+{% endif %}
+{% if include_worker %}
+  rabbitmq_data:
+{% endif %}
+
+services:
+
+{% if include_database %}
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks: [app]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: {{ project_slug | replace('-', '_') }}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d {{ project_slug | replace('-', '_') }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+{% endif %}
+{% if include_worker %}
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    networks: [app]
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+{% endif %}
+{% if include_cache %}
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [app]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+{% endif %}
+{% if include_database %}
+  # One-shot migration runner. Applies all pending Alembic migrations, then
+  # exits — fastapi/worker block on it via `service_completed_successfully` so
+  # the app never starts against a schema it doesn't match.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: "no"
+    networks: [app]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/{{ project_slug | replace('-', '_') }}}
+      - APP__ENVIRONMENT=staging
+    command: ["uv", "run", "--no-dev", "alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+{% endif %}
+{% if include_backend %}
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    networks: [app]
+    ports:
+      - "${FASTAPI_PORT:-8000}:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - APP__ENVIRONMENT=staging
+{% if include_database %}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/{{ project_slug | replace('-', '_') }}}
+{% endif %}
+{% if include_worker %}
+      - RABBITMQ_URL=${RABBITMQ_URL:-amqp://guest:guest@rabbitmq/}
+{% endif %}
+{% if include_cache %}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+{% endif %}
+{% if include_auth %}
+      - API_KEY_SALT=${API_KEY_SALT:-change-me-in-staging}
+{% endif %}
+{% if include_ai_service %}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+{% endif %}
+{% if include_observability %}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - OBSERVABILITY__OTEL_ENDPOINT=${OTEL_ENDPOINT:-}
+      - OBSERVABILITY__OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-{{ project_slug }}-api}
+{% endif %}
+    depends_on:
+{% if include_database %}
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+{% endif %}
+{% if include_worker %}
+      rabbitmq:
+        condition: service_healthy
+{% endif %}
+{% if include_cache %}
+      redis:
+        condition: service_healthy
+{% endif %}
+
+{% endif %}
+{% if include_worker %}
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    networks: [app]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - APP__ENVIRONMENT=staging
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/{{ project_slug | replace('-', '_') }}}
+      - RABBITMQ_URL=${RABBITMQ_URL:-amqp://guest:guest@rabbitmq/}
+{% if include_ai_service %}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+{% endif %}
+{% if include_observability %}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - OBSERVABILITY__OTEL_ENDPOINT=${OTEL_ENDPOINT:-}
+      - OBSERVABILITY__OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-{{ project_slug }}-worker}
+{% endif %}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+{% endif %}
+{% if include_docs_site %}
+
+  # Dev/local convenience — never part of a production deployment (see Dockerfile.docs).
+  docs:
+    build:
+      context: .
+      dockerfile: Dockerfile.docs
+    restart: unless-stopped
+    networks: [app]
+    ports:
+      - "${DOCS_PORT:-8090}:80"
+{% endif %}

@@ -1,0 +1,147 @@
+"""Chat endpoint(s) — conversational agent (see ``app/features/ai/``).
+{% if include_worker %}
+
+``POST /chat`` is synchronous. ``POST /chat/jobs`` / ``GET /chat/jobs/{job_id}``
+submit the same turn as an async job instead, for callers that would rather
+poll than hold a connection open. Both paths call
+``app.features.ai.service.chat`` — there is no separate copy of the
+agent-calling logic for the async path.
+{% endif %}
+"""
+
+from __future__ import annotations
+
+{% if include_worker %}
+import uuid
+from typing import Any
+
+{% endif %}
+import structlog
+from fastapi import APIRouter
+{% if include_worker %}
+from fastapi import Header, HTTPException
+{% endif %}
+from pydantic import BaseModel
+
+{% if include_auth %}
+from app.core.auth import ApiKeyDep
+{% endif %}
+{% if include_worker %}
+from app.core.config import get_settings
+from app.core.dependencies import SessionDep
+from app.core.security import fingerprint_body
+from app.db.repositories.idempotency import IdempotencyRepository
+from app.db.repositories.jobs import JobRepository
+from app.infrastructure import rabbitmq
+{% endif %}
+from app.features.ai.service import chat as run_chat
+
+logger = structlog.get_logger(__name__)
+router = APIRouter(prefix="/chat", tags=["Chat"])
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    reply: str
+
+
+@router.post("", summary="Send a chat message")
+async def send_message(
+    body: ChatRequest,
+{% if include_auth %}
+    _auth: ApiKeyDep,
+{% endif %}
+) -> ChatResponse:
+    """Run one synchronous conversational turn and return the agent's reply."""
+    reply = await run_chat(body.session_id, body.message)
+    return ChatResponse(session_id=body.session_id, reply=reply)
+{% if include_worker %}
+
+
+class ChatJobRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+class ChatJobAccepted(BaseModel):
+    job_id: str
+    status: str
+
+
+class ChatJobStatus(BaseModel):
+    job_id: str
+    status: str
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
+@router.post(
+    "/jobs",
+    status_code=202,
+    summary="Submit a chat turn as an async job",
+)
+async def submit_chat_job(
+    body: ChatJobRequest,
+    session: SessionDep,
+{% if include_auth %}
+    _auth: ApiKeyDep,
+{% endif %}
+    x_idempotency_key: str = Header(..., alias="X-Idempotency-Key"),
+) -> ChatJobAccepted:
+    """Queue a chat turn for the worker and return immediately with a job id.
+
+    Idempotent on ``X-Idempotency-Key``: replaying the same key with the same
+    request body returns the original job id instead of enqueuing a second
+    job; reusing the key with a *different* body is rejected.
+    """
+    payload = body.model_dump()
+    fingerprint = fingerprint_body(payload)
+    idempotency_repo = IdempotencyRepository(session)
+    claim = await idempotency_repo.claim(x_idempotency_key, fingerprint)
+
+    if claim.fingerprint_mismatch:
+        raise HTTPException(
+            status_code=409,
+            detail="X-Idempotency-Key was already used with a different request body",
+        )
+    if not claim.claimed:
+        if claim.status == "completed" and claim.result is not None:
+            return ChatJobAccepted(**claim.result)
+        # A fuller implementation would poll IdempotencyRepository.poll_for_completion()
+        # here instead of bouncing the client; kept simple for the template default.
+        raise HTTPException(
+            status_code=409,
+            detail="A request with this idempotency key is already being processed",
+        )
+
+    job_repo = JobRepository(session)
+    job = await job_repo.create("chat", payload)
+    await rabbitmq.publish_job({"job_id": str(job.id)}, get_settings().app.environment)
+
+    result = {"job_id": str(job.id), "status": "queued"}
+    await idempotency_repo.complete(x_idempotency_key, fingerprint, result)
+    return ChatJobAccepted(**result)
+
+
+@router.get(
+    "/jobs/{job_id}",
+    summary="Poll a chat job's status/result",
+)
+async def get_chat_job(
+    job_id: uuid.UUID,
+    session: SessionDep,
+{% if include_auth %}
+    _auth: ApiKeyDep,
+{% endif %}
+) -> ChatJobStatus:
+    """Look up a previously submitted chat job by id."""
+    job = await JobRepository(session).get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return ChatJobStatus(job_id=str(job.id), status=job.status, result=job.result, error=job.error)
+{% endif %}

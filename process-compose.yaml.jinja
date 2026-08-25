@@ -1,0 +1,61 @@
+# process-compose.yaml — local development process manager
+#
+# Runs the app's processes natively (no Docker) in one terminal with a TUI:
+# colour-coded logs, per-process status, restart on failure.
+#
+# Install (one-time per machine):
+#   Mac   ->  brew install f1bonacc1/tap/process-compose
+#   Linux ->  sh -c "$(curl -L https://raw.githubusercontent.com/F1bonacc1/process-compose/main/scripts/get-pc.sh)" -- -d -b ~/.local/bin
+#
+# Usage: process-compose up   |   process-compose up api   |   Ctrl+C to stop everything
+{% if include_database or include_worker %}
+#
+# Prerequisites: Postgres{% if include_worker %} and RabbitMQ{% endif %} must already be
+# running (see docker-compose.yml, or run them natively). Configure connection
+# strings in .env. Run `uv run alembic upgrade head` once after clone.
+{% endif %}
+
+version: "0.5"
+
+processes:
+{% if include_backend %}
+
+  api:
+    command: "uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
+    availability:
+      restart: on_failure
+      max_restarts: 5
+      backoff_seconds: 2
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+{% endif %}
+{% if include_worker %}
+
+  worker:
+    command: "uv run python -m app.worker.main"
+{% if include_backend %}
+    depends_on:
+      api:
+        condition: process_started
+{% endif %}
+    availability:
+      restart: on_failure
+      max_restarts: 5
+      backoff_seconds: 2
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+{% endif %}
+{% if include_docs_site %}
+
+  docs:
+    command: "uv run mkdocs serve -a 0.0.0.0:8001"
+    availability:
+      restart: on_failure
+      max_restarts: 5
+      backoff_seconds: 2
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+{% endif %}

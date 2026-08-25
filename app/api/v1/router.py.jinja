@@ -1,0 +1,33 @@
+"""API v1 router — mounts all endpoint routers under the /api/v1 prefix.
+
+Every feature router is registered here so ``app/main.py`` only needs to include
+a single ``api_router``. Adding a new feature means:
+
+1. Create ``app/api/v1/endpoints/<feature>.py`` with a ``router = APIRouter()``.
+2. Import that router below and call ``api_router.include_router(feature.router)``.
+
+Current routes
+--------------
+- ``GET  /api/v1/health``  — liveness / readiness probe
+{% if include_ai_service %}
+- ``POST /api/v1/chat``    — conversational agent (see app/features/ai/)
+{% if include_worker %}
+- ``POST /api/v1/chat/jobs``          — submit a slow/batch AI job (async)
+- ``GET  /api/v1/chat/jobs/{job_id}`` — poll job status/result
+{% endif %}
+{% endif %}
+"""
+
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import health
+{% if include_ai_service %}
+from app.api.v1.endpoints import chat
+{% endif %}
+
+api_router = APIRouter(prefix="/api/v1")
+
+api_router.include_router(health.router)
+{% if include_ai_service %}
+api_router.include_router(chat.router)
+{% endif %}

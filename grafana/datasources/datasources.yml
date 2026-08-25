@@ -1,0 +1,11 @@
+# Grafana datasource provisioning — auto-configures the Prometheus datasource
+# on container start. uid must match "prometheus" (referenced by dashboard JSON).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

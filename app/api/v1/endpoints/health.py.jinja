@@ -1,0 +1,173 @@
+"""Health check endpoint.
+
+Exposes GET /api/v1/health with two probe modes:
+
+- **liveness** (default): confirms the API process can respond to a trivial
+  request at all. No settings lookup, no dependency calls — a liveness probe
+  exists to catch a wedged/deadlocked process, and restarting the container
+  never fixes an external outage, so external state must never be able to
+  fail this probe.
+
+- **readiness**: pings every enabled dependency to decide whether this pod
+  should keep receiving traffic.
+{% if include_database %}
+    - Postgres down -> ``"unhealthy"``, HTTP 503 (pod pulled from rotation).
+{% endif %}
+{% if include_worker or include_ai_service %}
+    - {% if include_worker %}RabbitMQ{% endif %}{% if include_worker and include_ai_service %} or {% endif %}{% if include_ai_service %}the LLM provider{% endif %} down -> ``"degraded"``, HTTP 200 (still routed).
+{% endif %}
+    - Everything up -> ``"healthy"``, HTTP 200.
+
+Not included in the OpenAPI schema (``include_in_schema=False``): this is an
+infrastructure endpoint, not a product API.
+"""
+
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
+
+import structlog
+from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
+{% if include_database %}
+from app.db.postgres import ping
+{% endif %}
+{% if include_worker %}
+from app.infrastructure.rabbitmq import get_publisher_connection_status
+{% endif %}
+{% if include_ai_service %}
+from app.llm.factory import get_llm
+{% endif %}
+
+router = APIRouter()
+logger = structlog.get_logger(__name__)
+
+
+class ProbeType(StrEnum):
+    """Selects the depth of the health check.
+
+    Attributes:
+        liveness: Is the process itself responsive? No external calls at all.
+        readiness: Full dependency check.
+    """
+
+    liveness = "liveness"
+    readiness = "readiness"
+
+
+_PROBE_QUERY = Query(
+    default=ProbeType.liveness,
+    description=(
+        "liveness — is the process itself responsive, no external calls (default). "
+        "readiness — pings every configured dependency."
+    ),
+)
+{% if include_database %}
+
+
+async def _check_postgres() -> dict[str, Any]:
+    try:
+        latency = await ping()
+        return {"status": "up", "latency_ms": latency}
+    except Exception as exc:
+        logger.error("postgres_health_failed", error=str(exc))
+        return {"status": "down", "error": str(exc)}
+{% endif %}
+{% if include_worker %}
+
+
+async def _check_rabbitmq() -> dict[str, Any]:
+    try:
+        connected = get_publisher_connection_status()
+        down = [name for name, is_up in connected.items() if not is_up]
+        if down:
+            return {"status": "down", "error": f"not connected: {', '.join(down)}"}
+        return {"status": "up"}
+    except Exception as exc:
+        logger.error("rabbitmq_health_failed", error=str(exc))
+        return {"status": "down", "error": str(exc)}
+{% endif %}
+{% if include_ai_service %}
+
+
+async def _check_llm() -> dict[str, Any]:
+    """Ping the LLM provider with a trivial 1-token completion.
+
+    No caching here (unlike a high-traffic production pipeline) — this is the
+    template's default; add a TTL cache if readiness polling gets frequent
+    enough to worry about token cost or provider rate limits.
+    """
+    try:
+        llm = get_llm()
+        await llm.complete(messages=[{"role": "user", "content": "ping"}], max_tokens=4)
+        return {"status": "up"}
+    except Exception as exc:
+        logger.error("llm_health_failed", error=str(exc))
+        return {"status": "down", "error": str(exc)[:200]}
+{% endif %}
+
+
+def _build_response(
+    status_code: int,
+    overall: str,
+    probe: ProbeType,
+    services: dict[str, Any] | None = None,
+) -> JSONResponse:
+    content: dict[str, Any] = {
+        "status": overall,
+        "probe": probe,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if services is not None:
+        content["services"] = services
+    return JSONResponse(status_code=status_code, content=content)
+
+
+@router.get(
+    "/health",
+    tags=["Health"],
+    summary="Service health check",
+    include_in_schema=False,
+)
+async def health_check(probe: ProbeType = _PROBE_QUERY) -> JSONResponse:
+    """Check the health of the service, at one of two depths.
+
+    Args:
+        probe: Which depth of check to perform. Defaults to ``liveness``.
+
+    Returns:
+        A ``JSONResponse`` with HTTP 200 (healthy/degraded) or HTTP 503 (unhealthy).
+    """
+    if probe == ProbeType.liveness:
+        return _build_response(200, "healthy", probe)
+
+    services: dict[str, Any] = {}
+    hard_down = False
+    soft_down = False
+{% if include_database %}
+
+    pg = await _check_postgres()
+    services["postgres"] = pg
+    hard_down = hard_down or pg["status"] != "up"
+{% endif %}
+{% if include_worker %}
+
+    rabbit = await _check_rabbitmq()
+    services["rabbitmq"] = rabbit
+    soft_down = soft_down or rabbit["status"] != "up"
+{% endif %}
+{% if include_ai_service %}
+
+    llm = await _check_llm()
+    services["llm"] = llm
+    soft_down = soft_down or llm["status"] != "up"
+{% endif %}
+
+    if hard_down:
+        status_code, overall = 503, "unhealthy"
+    elif soft_down:
+        status_code, overall = 200, "degraded"
+    else:
+        status_code, overall = 200, "healthy"
+
+    return _build_response(status_code, overall, probe, services or None)

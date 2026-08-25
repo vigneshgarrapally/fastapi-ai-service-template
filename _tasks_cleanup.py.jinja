@@ -1,0 +1,102 @@
+"""One-shot post-generation cleanup — deletes files for declined components/services.
+
+Rendered from _tasks_cleanup.py.jinja by Copier, run once via the `_tasks` entry in
+copier.yml, then deleted by the next `_tasks` step. Not part of the generated project.
+"""
+
+import pathlib
+import shutil
+
+include_backend = {{ include_backend }}
+include_database = {{ include_database }}
+include_worker = {{ include_worker }}
+include_cache = {{ include_cache }}
+include_observability = {{ include_observability }}
+include_docs_site = {{ include_docs_site }}
+include_auth = {{ include_auth }}
+include_ai_service = {{ include_ai_service }}
+
+root = pathlib.Path(".")
+
+
+def rm(*parts: str) -> None:
+    path = root.joinpath(*parts)
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+if not include_backend:
+    rm("app", "main.py")
+    rm("app", "api")
+    rm("Dockerfile.api")
+    rm("tests", "api")
+
+if not (include_backend or include_worker):
+    # Nothing to hot-reload — override.yml only overrides fastapi/worker.
+    rm("docker-compose.override.yml")
+    # Nothing for a native (non-Docker) process manager to run either.
+    rm("process-compose.yaml")
+
+if not (
+    include_backend or include_worker or include_database or include_cache or include_docs_site
+):
+    # Nothing to containerize — a plain script/library project.
+    rm("docker-compose.yml")
+    rm("docker-compose.observability.yml")
+
+if not include_database:
+    rm("app", "db")
+    rm("alembic")
+    rm("alembic.ini")
+    rm("tests", "db")
+
+if not include_worker:
+    rm("app", "worker")
+    rm("app", "infrastructure", "rabbitmq.py")
+    rm("Dockerfile.worker")
+    rm("tests", "worker")
+    rm("tests", "db", "repositories", "test_jobs.py")
+    rm("tests", "db", "repositories", "test_idempotency.py")
+    rm("scripts", "redrive_dlq.py")
+
+if not include_cache:
+    rm("app", "infrastructure", "cache.py")
+    rm("tests", "infrastructure", "test_cache.py")
+
+if not include_observability:
+    rm("app", "core", "observability.py")
+    rm("app", "core", "tracing.py")
+    rm("grafana")
+    rm("prometheus")
+    rm("docker-compose.observability.yml")
+
+if not include_docs_site:
+    rm("docs")
+    rm("mkdocs.yml")
+    rm("Dockerfile.docs")
+
+if not include_auth:
+    rm("app", "core", "auth.py")
+    rm("app", "db", "models", "api_key.py")
+    rm("app", "db", "repositories", "api_keys.py")
+    rm("tests", "core", "test_auth.py")
+    rm("tests", "db", "repositories", "test_api_keys.py")
+    rm("scripts", "manage_api_keys.py")
+
+if not include_ai_service:
+    rm("app", "features", "ai")
+    rm("app", "llm")
+    rm("app", "api", "v1", "endpoints", "chat.py")
+    rm("app", "worker", "ai_job_worker.py")
+    rm("evals")
+    rm("tests", "features", "ai")
+    rm("tests", "llm")
+    rm("tests", "api", "v1", "test_chat.py")
+
+# Remove now-empty leftover directories (e.g. app/api/v1/endpoints with nothing left).
+for dirpath in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+    if dirpath.is_dir() and not any(dirpath.iterdir()):
+        # .gitkeep-guarded empty dirs are intentional (e.g. alembic/versions); leave those.
+        dirpath.rmdir()

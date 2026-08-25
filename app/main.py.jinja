@@ -1,0 +1,154 @@
+"""FastAPI application entry point.
+
+Creates the ``app`` instance, registers middleware, and wires up the complete
+startup/shutdown lifecycle via the ``lifespan`` async context manager.
+
+CORS
+----
+Allowed origins are configured via ``Settings.app.allowed_origins``. Default is
+``["*"]`` for development; restrict to specific origins in production/staging.
+
+OpenAPI docs
+------------
+``/scalar`` (see ``app/api/scalar.py``) is the interactive API reference. The
+default FastAPI docs UIs (``/docs`` Swagger, ``/redoc``) are disabled — Scalar
+supersedes them. ``/scalar`` itself is served only in non-production.
+"""
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.scalar import register_scalar
+from app.api.v1.router import api_router
+from app.core.config import get_settings
+from app.core.exceptions import global_exception_handler
+from app.core.logging import setup_logging
+from app.core.middleware import RequestContextMiddleware
+{% if include_database %}
+from app.db.postgres import dispose_engine, init_engine, verify_connection
+{% endif %}
+{% if include_worker %}
+from app.infrastructure import rabbitmq
+{% endif %}
+{% if include_ai_service %}
+from app.llm.factory import init_llm
+{% endif %}
+{% if include_cache %}
+from app.infrastructure.cache import close_cache_client, init_cache_client
+{% endif %}
+{% if include_observability %}
+from prometheus_fastapi_instrumentator import Instrumentator
+
+from app.core.observability import init_langfuse, shutdown_langfuse
+from app.core.tracing import setup_tracing, shutdown_tracing
+{% endif %}
+
+setup_logging()
+logger = structlog.get_logger(__name__)
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Manage the application lifecycle — startup and graceful shutdown.
+
+    Note:
+        If any startup step raises an exception the remaining steps are
+        skipped and FastAPI will not accept requests. The shutdown block does
+        **not** run if startup fails, so dependent resources may not be
+        cleaned up — infrastructure-level health checks should detect this.
+    """
+    # Startup
+    logger.info("startup", app=settings.app.app_name, version=settings.app.app_version)
+{% if include_database %}
+
+    init_engine(
+        settings.secrets.database_url,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+    )
+    await verify_connection()
+    logger.info("startup.postgres.connected")
+{% endif %}
+{% if include_ai_service %}
+
+    init_llm(settings)
+    logger.info("startup.llm.initialized")
+{% endif %}
+{% if include_worker %}
+
+    await rabbitmq.connect(settings.secrets.rabbitmq_url)
+    logger.info("startup.rabbitmq.connected")
+{% endif %}
+{% if include_cache %}
+
+    await init_cache_client(settings.secrets.redis_url)
+    logger.info("startup.cache.connected")
+{% endif %}
+{% if include_observability %}
+
+    init_langfuse()
+    logger.info("startup.langfuse.connected")
+{% endif %}
+
+    yield
+
+    # Shutdown
+{% if include_observability %}
+    shutdown_langfuse()
+    shutdown_tracing()
+{% endif %}
+{% if include_worker %}
+    await rabbitmq.disconnect()
+{% endif %}
+{% if include_cache %}
+    await close_cache_client()
+{% endif %}
+{% if include_database %}
+    await dispose_engine()
+{% endif %}
+    logger.info("shutdown", app=settings.app.app_name)
+
+
+app = FastAPI(
+    title=settings.app.app_name,
+    version=settings.app.app_version,
+    # Scalar (/scalar) is the single API reference UI — disable the built-in
+    # Swagger/ReDoc UIs everywhere. See app/api/scalar.py.
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
+
+app.add_exception_handler(Exception, global_exception_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.app.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["X-API-Key", "Content-Type", "X-Idempotency-Key", "X-Request-ID"],
+)
+
+# RequestContextMiddleware — binds request_id, service, env, traceID into structlog
+app.add_middleware(RequestContextMiddleware)
+{% if include_observability %}
+
+# OTel tracing — added last so it sits outermost in the LIFO stack (runs first).
+# The span is started before RequestContextMiddleware.dispatch() reads the trace ID.
+# No-op when settings.observability.otel_endpoint is empty.
+setup_tracing(app, settings)
+
+# Prometheus /metrics endpoint — not protected by ApiKeyDep (same as /health).
+Instrumentator().instrument(app).expose(app, include_in_schema=False)
+{% endif %}
+
+app.include_router(api_router)
+
+# Interactive Scalar API reference at /scalar — primary API reference UI.
+# Registered only outside production (no-op there); see app/api/scalar.py.
+register_scalar(app, settings)

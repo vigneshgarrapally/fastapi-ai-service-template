@@ -1,0 +1,99 @@
+"""Unified worker entry point.
+
+Run with ``uv run python -m app.worker.main``. Connects to Postgres and
+RabbitMQ, starts the idempotency-cleanup background task, and consumes the
+``ai.jobs`` queue — one process, one entry point, mirroring how this runs in
+production. Each message gets its own session-per-message transaction
+(never share a session across messages).
+{% if not include_ai_service %}
+
+No job handler is registered yet (the AI service, which owns the only job type
+this template ships, is not included in this project). The queue will still
+receive messages if something publishes to it — add a handler and call it from
+``_handle_message`` below.
+{% endif %}
+"""
+
+import asyncio
+import json
+import uuid
+
+import structlog
+from aio_pika.abc import AbstractIncomingMessage
+
+from app.core.config import get_settings
+from app.core.logging import setup_logging
+from app.db.postgres import dispose_engine, get_session_factory, init_engine, verify_connection
+from app.db.repositories.jobs import JobRepository
+from app.infrastructure import rabbitmq
+from app.worker.idempotency_cleanup import run_idempotency_cleanup_loop
+{% if include_ai_service %}
+from app.llm.factory import init_llm
+from app.worker.ai_job_worker import handle_chat_job
+{% endif %}
+
+setup_logging()
+logger = structlog.get_logger(__name__)
+
+
+async def _handle_message(message: AbstractIncomingMessage) -> None:
+    async with message.process(requeue=False):
+        payload = json.loads(message.body)
+        job_id = uuid.UUID(str(payload["job_id"]))
+
+        session_factory = get_session_factory()
+        async with session_factory() as session, session.begin():
+            # The queue message only ever carries {job_id, ...envelope}; the
+            # dispatch key (job_type) and the actual work payload both live on
+            # the Job row in Postgres, not on the message itself.
+            job = await JobRepository(session).get(job_id)
+            if job is None:
+                logger.warning("worker.job.not_found", job_id=str(job_id))
+                return
+
+            logger.info("worker.job.received", job_id=str(job_id), job_type=job.job_type)
+{% if include_ai_service %}
+            if job.job_type == "chat":
+                await handle_chat_job(session, payload)
+            else:
+                logger.warning(
+                    "worker.job.unknown_type", job_id=str(job_id), job_type=job.job_type
+                )
+{% else %}
+            logger.warning("worker.job.no_handler_registered", job_id=str(job_id))
+{% endif %}
+
+
+async def main() -> None:
+    settings = get_settings()
+    logger.info("worker.startup", app=settings.app.app_name)
+
+    init_engine(
+        settings.secrets.database_url,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+    )
+    await verify_connection()
+{% if include_ai_service %}
+    init_llm(settings)
+{% endif %}
+
+    connection = await rabbitmq.connect_robust(settings.secrets.rabbitmq_url)
+    channel = await connection.channel()
+    await channel.set_qos(prefetch_count=settings.worker.prefetch)
+    _, queue = await rabbitmq.declare_topology(channel)
+
+    cleanup_task = asyncio.create_task(run_idempotency_cleanup_loop(settings))
+
+    logger.info("worker.consuming", queue=rabbitmq.QUEUE_NAME)
+    try:
+        await queue.consume(_handle_message)
+        await asyncio.Future()  # run forever
+    finally:
+        cleanup_task.cancel()
+        await connection.close()
+        await dispose_engine()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

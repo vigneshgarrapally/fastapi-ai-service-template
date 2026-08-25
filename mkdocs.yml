@@ -1,0 +1,120 @@
+# MkDocs config for the generated project's docs site.
+#
+# NOTE: `{{ project_name }}` is a Copier/Jinja variable and is NOT available here —
+# this file is a plain (non-`.jinja`) file, and the docs site is built as a static
+# artifact *after* generation, when there's no template context left to render.
+# `site_name` below is a generic placeholder — rename it in five seconds once the
+# project is generated (it's the only project-specific string in this file).
+site_name: AI-ML Service Docs
+docs_dir: docs
+site_dir: site
+# No `repo_url` here on purpose — the template doesn't know the generated project's
+# git remote. Once the project has one, add both of these and re-enable
+# `content.action.edit` / `content.action.view` below for "edit this page" /
+# "view source" links in the theme:
+#   repo_url: https://github.com/<org>/<repo>
+#   edit_uri: edit/main/docs/
+
+# Fail the build (not just warn) on broken nav entries, dead internal links,
+# broken #anchors, and unrecognized/absolute links. Run `mkdocs build --strict`
+# in CI so this becomes a real merge gate, the same way error_on_fail does for
+# the mermaid-to-svg plugin.
+strict: true
+validation:
+  omitted_files: warn      # docs/*.md files that exist but aren't wired into nav
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn             # dead #anchor links between pages
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer        # prev/next links, useful for reading ADRs/flows in sequence
+    - navigation.tracking      # URL updates to match active section on scroll
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.annotate
+    - content.code.copy
+    - content.tooltips
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.betterem
+  - tables
+  - attr_list
+  - md_in_html
+  - footnotes
+  - def_list
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Architecture:
+    - Component Overview: architecture/component-overview.md
+    - Data Model: architecture/data-model.md
+  - Flows:
+    - AI Service: flows/ai-service.md
+    - Auth Flow: flows/auth-flow.md
+    - Failure Paths: flows/failure-paths.md
+  - API Reference:
+    - Endpoints Overview: api/overview.md
+    - Error Catalog: api/error-catalog.md
+  - Decisions:
+    - "ADR 0: Record Architecture Decisions": decisions/0001-record-architecture-decisions.md
+    - "ADR: LLM Provider Switching": decisions/llm-provider-switching.md
+    - "ADR: Idempotency": decisions/idempotency.md
+  - Operations:
+    - Local Setup: operations/local-setup.md
+    - Environment Variables: operations/environment-variables.md
+    - Contributing: contributing.md
+
+plugins:
+  - search
+  # Renders every ```mermaid fence to a static SVG at build time (via mermaid-cli),
+  # instead of client-side JS. Diagrams don't fail to render at view-time and are
+  # zoomable through glightbox below. Requires Node.js + @mermaid-js/mermaid-cli
+  # locally — see "Building the docs locally" in docs/operations/local-setup.md.
+  - mermaid-to-svg
+  - glightbox:
+      auto_caption: false
+  # Shows a "last updated" timestamp per page, sourced from git history —
+  # useful for living documents like the ADRs. Requires the generated project
+  # to be a git repository with history (Copier's `_tasks` already runs `git init`
+  # + an initial commit, so this works out of the box).
+  - git-revision-date-localized:
+      enabled: true
+      type: timeago
+      fallback_to_build_date: true

@@ -1,0 +1,10 @@
+# Grafana dashboard provisioning — auto-loads every JSON file in this directory
+# on container start. See docker-compose.observability.yml for the volume mount.
+apiVersion: 1
+
+providers:
+  - name: default
+    folder: ""
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

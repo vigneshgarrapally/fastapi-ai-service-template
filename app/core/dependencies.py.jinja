@@ -1,0 +1,71 @@
+"""FastAPI dependency providers for shared resources.
+
+All injectable resources are defined here as annotated type aliases so endpoint
+functions can declare them as typed parameters without calling ``Depends()``
+manually at every use site.
+
+Usage in an endpoint::
+
+    from app.core.dependencies import SettingsDep{% if include_ai_service %}, LLMDep{% endif %}
+
+    @router.get("/example")
+    async def example(settings: SettingsDep) -> dict:
+        ...
+"""
+
+from typing import Annotated
+
+from fastapi import Depends
+
+from app.core.config import Settings, get_settings
+{% if include_database %}
+from app.db.postgres import get_session
+from sqlalchemy.ext.asyncio import AsyncSession
+{% endif %}
+{% if include_auth %}
+from app.db.repositories.api_keys import ApiKeyRepository
+{% endif %}
+{% if include_ai_service %}
+from app.llm.base import LLMProvider
+from app.llm.factory import get_llm
+{% endif %}
+{% if include_cache %}
+from app.infrastructure.cache import CacheClient, get_cache_client
+{% endif %}
+
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+"""Injects the cached ``Settings`` singleton."""
+
+{% if include_database %}
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+"""Injects a transactional ``AsyncSession`` for the current request."""
+
+{% endif %}
+{% if include_auth %}
+
+def _get_api_key_repo(session: SessionDep) -> ApiKeyRepository:
+    return ApiKeyRepository(session)
+
+
+ApiKeyRepoDep = Annotated[ApiKeyRepository, Depends(_get_api_key_repo)]
+{% endif %}
+{% if include_ai_service %}
+
+
+def _get_llm() -> LLMProvider:
+    return get_llm()
+
+
+LLMDep = Annotated[LLMProvider, Depends(_get_llm)]
+"""Injects the AI service's LLM provider singleton."""
+{% endif %}
+{% if include_cache %}
+
+
+def _get_cache() -> CacheClient:
+    return get_cache_client()
+
+
+CacheDep = Annotated[CacheClient, Depends(_get_cache)]
+"""Injects the Redis cache client singleton."""
+{% endif %}

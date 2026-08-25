@@ -1,0 +1,269 @@
+"""Application settings — single source of truth for all configuration.
+
+Configuration is split in two:
+
+* **Secrets** (API keys, connection strings, salts) live **only** in the environment /
+  ``.env`` file, loaded by :class:`Secrets` using flat env names (e.g. ``DATABASE_URL``).
+* **Everything else** (pool sizes, timeouts, provider choice) lives in a committed
+  **``config.yaml``**, grouped by area. These groups map to nested sub-models on
+  :class:`Settings`.
+
+Source precedence (highest wins)::
+
+    environment variable  ->  .env file  ->  config.yaml  ->  field default
+
+Any non-secret value can be overridden per-environment with an environment variable
+using the ``__`` nested delimiter, e.g. ``DATABASE__POOL_SIZE=20``.
+
+Usage::
+
+    from app.core.config import get_settings
+
+    settings = get_settings()                 # cached singleton — call anywhere
+    print(settings.secrets.database_url)      # secret, from env/.env
+{% if include_database %}
+    print(settings.database.pool_size)        # non-secret, from config.yaml
+{% endif %}
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
+{% if include_ai_service %}
+
+from app.llm.config import LLMSettings
+{% endif %}
+
+
+def _config_file() -> str:
+    """Resolve the yaml config path (``CONFIG_FILE`` env var or default)."""
+    return os.getenv("CONFIG_FILE", "config.yaml")
+
+
+# ---------------------------------------------------------------------------
+# Secrets — env / .env only, flat names, never in config.yaml
+# ---------------------------------------------------------------------------
+class Secrets(BaseSettings):
+    """Sensitive values. Loaded exclusively from the environment / ``.env``.
+
+    Empty defaults keep optional integrations silently disabled and let required
+    ones surface their own errors downstream, instead of failing at import time.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+{% if include_database %}
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/{{ project_slug | replace('-', '_') }}"
+{% endif %}
+{% if include_worker %}
+    rabbitmq_url: str = "amqp://guest:guest@localhost/"
+{% endif %}
+{% if include_cache %}
+    redis_url: str = "redis://localhost:6379/0"
+{% endif %}
+{% if include_auth %}
+    api_key_salt: str = "change-me-in-production"
+{% endif %}
+{% if include_ai_service %}
+    openai_api_key: str = ""
+    azure_openai_api_key: str = ""
+{% endif %}
+{% if include_observability %}
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+{% endif %}
+
+
+# ---------------------------------------------------------------------------
+# Non-secret config groups — loaded from config.yaml
+# ---------------------------------------------------------------------------
+class AppConfig(BaseModel):
+    """App metadata, server, CORS, and logging.
+
+    Attributes:
+        app_name: Human-readable service name surfaced in FastAPI docs and logs.
+        app_version: Semver string exposed in the OpenAPI schema.
+        environment: Deployment tier. Controls log format{% if include_backend %} and disables
+            ``/docs``/``/redoc`` in production{% endif %}.
+        debug: When ``True``, forces ``log_level`` to DEBUG.
+{% if include_backend %}
+        host: Bind address for the Uvicorn server.
+        port: Listen port.
+        allowed_origins: CORS allowed-origins list. Use ``["*"]`` only in dev.
+        public_base_url: Optional explicit base URL for the Scalar API
+            reference's built-in "Test Request" client (the OpenAPI ``servers``
+            entry). Leave empty (the default) to let Scalar target the origin
+            the browser loaded ``/scalar`` from. Set it only when the public
+            URL differs from the browser origin (reverse proxy, custom domain).
+{% endif %}
+        log_level: Minimum log level.
+    """
+
+    app_name: str = "{{ project_name }}"
+    app_version: str = "0.1.0"
+    environment: str = Field(
+        default="development", pattern="^(development|local|staging|production)$"
+    )
+    debug: bool = False
+{% if include_backend %}
+
+    host: str = "0.0.0.0"
+    port: int = 8000
+    allowed_origins: list[str] = ["*"]
+    public_base_url: str = ""
+{% endif %}
+
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+{% if include_database %}
+
+class DatabaseConfig(BaseModel):
+    """SQLAlchemy async engine connection pool sizing."""
+
+    pool_size: int = Field(default=10, gt=0)
+    max_overflow: int = Field(default=20, ge=0)
+{% endif %}
+{% if include_worker %}
+
+class WorkerConfig(BaseModel):
+    """Async job runtime: RabbitMQ prefetch, retries, idempotency TTL."""
+
+    prefetch: int = Field(default=5, gt=0)
+    max_retries: int = Field(default=3, ge=0)
+    idem_ttl_hours: int = Field(default=24, gt=0)
+    idem_cleanup_interval_seconds: int = Field(default=3600, gt=0)
+{% endif %}
+{% if include_cache %}
+
+class CacheConfig(BaseModel):
+    """Redis cache defaults."""
+
+    default_ttl_seconds: int = Field(default=3600, gt=0)
+{% endif %}
+{% if include_observability %}
+
+class ObservabilityConfig(BaseModel):
+    """Non-secret observability config (secret keys live in :class:`Secrets`).
+
+    Attributes:
+        langfuse_host: Langfuse server URL (cloud or self-hosted).
+        otel_endpoint: OTLP gRPC endpoint (e.g. ``tempo:4317``). Empty disables tracing.
+        otel_service_name: Service name for traces. Defaults to app_name when empty.
+    """
+
+    langfuse_host: str = "https://cloud.langfuse.com"
+    otel_endpoint: str = ""
+    otel_service_name: str = ""
+{% endif %}
+{% if include_ai_service %}
+
+class AIServiceConfig(BaseModel):
+    """AI/agent service: LLM provider + call tuning.
+
+    Attributes:
+        llm: Nested LLM provider settings (provider + per-provider config).
+        temperature: Sampling temperature for the conversational agent.
+        max_history_messages: How many prior turns to keep in the session's memory.
+    """
+
+    llm: LLMSettings = LLMSettings()
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_history_messages: int = Field(default=20, gt=0)
+{% endif %}
+
+
+# ---------------------------------------------------------------------------
+# Top-level settings
+# ---------------------------------------------------------------------------
+class Settings(BaseSettings):
+    """Typed, validated settings for {{ project_name }}.
+
+    Non-secret groups are populated from ``config.yaml`` (path overridable via the
+    ``CONFIG_FILE`` env var). Any individual non-secret value can be overridden with
+    an environment variable using the ``__`` nested delimiter. Secrets are loaded
+    separately from the environment / ``.env`` via :class:`Secrets`.
+    """
+
+    model_config = SettingsConfigDict(
+        env_nested_delimiter="__",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        yaml_file=_config_file(),
+        yaml_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    app: AppConfig = AppConfig()
+{% if include_database %}
+    database: DatabaseConfig = DatabaseConfig()
+{% endif %}
+{% if include_worker %}
+    worker: WorkerConfig = WorkerConfig()
+{% endif %}
+{% if include_cache %}
+    cache: CacheConfig = CacheConfig()
+{% endif %}
+{% if include_observability %}
+    observability: ObservabilityConfig = ObservabilityConfig()
+{% endif %}
+{% if include_ai_service %}
+    ai: AIServiceConfig = AIServiceConfig()
+{% endif %}
+    secrets: Secrets = Field(default_factory=Secrets)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Add the yaml source. Precedence (highest first): init -> env -> .env -> yaml."""
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            YamlConfigSettingsSource(settings_cls),
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return the application settings singleton.
+
+    Constructed once and cached via ``@lru_cache``; safe to call from anywhere.
+
+    Raises:
+        FileNotFoundError: If the configured ``config.yaml`` does not exist. We fail
+            fast rather than silently fall back to defaults for a missing config file.
+
+    Note:
+        In tests, call ``get_settings.cache_clear()`` before injecting a custom
+        environment to force re-construction.
+    """
+    config_path = Path(_config_file())
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Config file not found: {config_path!s}. Set CONFIG_FILE or create "
+            "config.yaml at the repo root. (Secrets still come from .env.)"
+        )
+    return Settings()
