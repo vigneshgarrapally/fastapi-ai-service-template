@@ -68,6 +68,15 @@ author_email:
   type: str
   help: "Your email (used in pyproject.toml)"
 
+python_version:
+  type: str
+  help: "Python version — pins .python-version, pyproject.toml's requires-python/mypy target, and the Docker base images"
+  choices:
+    - "3.11"
+    - "3.12"
+    - "3.13"
+  default: "3.13"
+
 # ---------------------------------------------------------------------------
 # Components — infrastructure primitives. Each is independent; enable only
 # what this project actually needs.

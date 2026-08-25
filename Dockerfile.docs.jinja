@@ -7,7 +7,7 @@
 #
 # Dev/local only — this image is not part of the production deployment.
 
-FROM python:3.13-slim-bookworm AS builder
+FROM python:{{ python_version }}-slim-bookworm AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 

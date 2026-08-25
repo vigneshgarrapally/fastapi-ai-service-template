@@ -1,4 +1,4 @@
-FROM python:3.13-slim-bookworm AS builder
+FROM python:{{ python_version }}-slim-bookworm AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
-FROM python:3.13-slim-bookworm
+FROM python:{{ python_version }}-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -28,6 +28,4 @@ COPY --from=builder /app /app
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 8000
-
-CMD ["sh", "-c", "exec uv run --no-dev uvicorn app.main:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers \"${WORKERS:-1}\" --proxy-headers"]
+CMD ["uv", "run", "--no-dev", "python", "-m", "app.worker.main"]
