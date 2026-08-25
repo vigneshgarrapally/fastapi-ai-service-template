@@ -107,6 +107,18 @@ two published copies (`README.md`, `LICENSE`, `CODEOWNERS`, `CONTRIBUTING.md`).
 directory and overlays that variant's branding on top — it does not push anything.
 Everything else (this `CLAUDE.md` included) is identical between the two.
 
+## Planned
+
+- Replace the unconditionally-rendered `CLAUDE.md.jinja` with an agent-agnostic
+  `AGENTS.md.jinja` as the canonical file, and make `CLAUDE.md.jinja` a one-line pointer
+  to it ("See AGENTS.md."). `AGENTS.md` is becoming the shared convention across coding
+  agents (Claude Code, Cursor, Codex, Aider), so this covers whichever tool a generated
+  project's developer uses without a new toggle — a toggle would need a new `copier.yml`
+  question plus hub-file branches plus `_tasks_cleanup.py.jinja` entries, all avoidable
+  since a pointer file works regardless of tool choice. Separately, decide whether to also
+  parameterize which *agent framework* the AI service's own agent runs on (currently always
+  LangGraph) — that one's a real structural toggle, not a docs-only change.
+
 ## Known gaps
 
 - The Cache component (`app/infrastructure/cache.py`) is only unit-tested against a
