@@ -118,6 +118,16 @@ Everything else (this `CLAUDE.md` included) is identical between the two.
   since a pointer file works regardless of tool choice. Separately, decide whether to also
   parameterize which *agent framework* the AI service's own agent runs on (currently always
   LangGraph) — that one's a real structural toggle, not a docs-only change.
+- On top of the AGENTS.md/CLAUDE.md pointer above: ask a `coding_agent` question
+  (`claude_code` / `other` / `none`) and, when `claude_code`, additionally render a
+  `.claude/settings.json.jinja` (permissions allowlist for this project's own dev commands
+  — `uv run pytest`, `uv run ruff`, `uv run alembic`, etc. — plus `attribution: {commit:
+  "", pr: ""}` to match this template repo's own choice) and a handful of `.claude/skills/`
+  bound to real scripts that already exist per-toggle: `manage_api_keys.py` (Auth),
+  `redrive_dlq.py` (Worker), `evals/main.py` (AI service). This is a real structural
+  toggle — new `copier.yml` question, hub-file branches, `_tasks_cleanup.py.jinja` entries
+  for the declined path — not just a docs swap, so scope and confirm the skill list before
+  building it.
 
 ## Known gaps
 
